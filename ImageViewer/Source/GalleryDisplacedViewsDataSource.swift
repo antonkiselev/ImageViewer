@@ -23,4 +23,12 @@ public protocol DisplaceableView {
 public protocol GalleryDisplacedViewsDataSource: class {
 
     func provideDisplacementItem(atIndex index: Int) -> DisplaceableView?
+    func providePlaceholderImage(_ index: Int) -> UIImage?
+
+}
+
+public extension GalleryDisplacedViewsDataSource {
+    func providePlaceholderImage(_ index: Int) -> UIImage? {
+        return nil
+    }
 }

@@ -9,8 +9,17 @@
 import UIKit
 
 public protocol ItemView {
-
     var image: UIImage? { get set }
+}
+
+public protocol ImageViewerLoader: class {
+    func startAnimating()
+    func stopAnimating()
+    var view: UIView { get }
+}
+
+extension UIActivityIndicatorView: ImageViewerLoader {
+    public var view: UIView { return self }
 }
 
 open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGestureRecognizerDelegate, UIScrollViewDelegate where T: ItemView {
@@ -18,7 +27,25 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
     //UI
     public var itemView = T()
     let scrollView = UIScrollView()
-    let activityIndicatorView = UIActivityIndicatorView(activityIndicatorStyle: .white)
+    private var activityIndicatorConstructor: (() -> ImageViewerLoader)?
+    private var _indicator: ImageViewerLoader?
+    var activityIndicator: ImageViewerLoader! {
+        get {
+            if _indicator == nil {
+                if let getter = activityIndicatorConstructor {
+                    _indicator = getter()
+                } else {
+                    let indicator = UIActivityIndicatorView(activityIndicatorStyle: .white)
+                    indicator.hidesWhenStopped = true
+                    _indicator = indicator
+                }
+            }
+            return _indicator!
+        }
+        set {
+            _indicator = newValue
+        }
+    }
 
     //DELEGATE / DATASOURCE
     weak public var delegate:                 ItemControllerDelegate?
@@ -31,15 +58,17 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
     var swipingToDismiss: SwipeToDismiss?
     fileprivate var isAnimating = false
     fileprivate var fetchImageBlock: FetchImageBlock
+    private var fetchImageCompleted: Bool = false
+    private weak var tempDisplacementView: UIView?
 
     //CONFIGURATION
     fileprivate var presentationStyle = GalleryPresentationStyle.displacement
     fileprivate var doubleTapToZoomDuration = 0.15
-    fileprivate var displacementDuration: TimeInterval = 0.55
+    fileprivate var displacementDuration: TimeInterval = 0.35
     fileprivate var reverseDisplacementDuration: TimeInterval = 0.25
     fileprivate var itemFadeDuration: TimeInterval = 0.3
     fileprivate var displacementTimingCurve: UIViewAnimationCurve = .linear
-    fileprivate var displacementSpringBounce: CGFloat = 0.7
+    fileprivate var displacementSpringBounce: CGFloat = 0.8
     fileprivate let minimumZoomScale: CGFloat = 1
     fileprivate var maximumZoomScale: CGFloat = 8
     fileprivate var pagingMode: GalleryPagingMode = .standard
@@ -84,8 +113,8 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
             case .displacementInsetMargin(let margin):              displacementInsetMargin = margin
             case .swipeToDismissMode(let mode):                     swipeToDismissMode = mode
             case .toggleDecorationViewsBySingleTap(let enabled):    toggleDecorationViewBySingleTap = enabled
-            case .spinnerColor(let color):                          activityIndicatorView.color = color
-            case .spinnerStyle(let style):                          activityIndicatorView.activityIndicatorViewStyle = style
+            case .customLoader(let viewConstructor):
+                activityIndicatorConstructor = viewConstructor
 
             case .displacementTransitionStyle(let style):
 
@@ -102,13 +131,6 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
         super.init(nibName: nil, bundle: nil)
 
         self.modalPresentationStyle = .custom
-
-        self.itemView.isHidden = isInitialController
-
-        configureScrollView()
-        configureGestureRecognizers()
-
-        activityIndicatorView.hidesWhenStopped = true
     }
 
     @available (*, unavailable)
@@ -163,12 +185,18 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
     }
 
     fileprivate func createViewHierarchy() {
+        self.itemView.isHidden = isInitialController
 
         self.view.addSubview(scrollView)
         scrollView.addSubview(itemView)
 
-        activityIndicatorView.startAnimating()
-        view.addSubview(activityIndicatorView)
+        if !isInitialController, let img = self.displacedViewsDataSource?.providePlaceholderImage(index) {
+            itemView.image = img
+            itemView.isHidden = false
+        } else {
+            activityIndicator.startAnimating()
+            scrollView.addSubview(activityIndicator.view)
+        }
     }
 
     // MARK: - View Controller Lifecycle
@@ -177,18 +205,21 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
         super.viewDidLoad()
 
         createViewHierarchy()
+        configureScrollView()
+        configureGestureRecognizers()
 
         fetchImage()
     }
 
     public func fetchImage() {
-
         fetchImageBlock { [weak self] image in
-
             if let image = image {
 
                 DispatchQueue.main.async {
-                    self?.activityIndicatorView.stopAnimating()
+                    self?.activityIndicator.stopAnimating()
+                    self?.fetchImageCompleted = true
+                    self?.tempDisplacementView?.removeFromSuperview()
+                    self?.tempDisplacementView = nil
 
                     self?.itemView.image = image
 
@@ -221,7 +252,8 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
         super.viewDidLayoutSubviews()
 
         scrollView.frame = self.view.bounds
-        activityIndicatorView.center = view.boundsCenter
+        activityIndicator.view.frame = view.bounds
+        activityIndicator.view.center = view.boundsCenter
 
         if let size = itemView.image?.size , size != CGSize.zero {
 
@@ -276,7 +308,7 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
     func scrollViewDidSwipeToDismiss(_ recognizer: UIPanGestureRecognizer) {
 
         /// a swipe gesture on image view that has no image (it was not yet loaded, so we see a spinner) doesn't make sense
-        guard itemView.image != nil else {  return }
+//        guard itemView.image != nil else {  return }
 
         /// A deliberate UX decision...you have to zoom back in to scale 1 to be able to swipe to dismiss. It is difficult for the user to swipe to dismiss from images larger then screen bounds because almost all the time it's not swiping to dismiss but instead panning a zoomed in picture on the canvas.
         guard scrollView.zoomScale == scrollView.minimumZoomScale else { return }
@@ -345,34 +377,34 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
 
         /// Any item VERTICAL UP direction
         case (.vertical, _) where velocity.y < -thresholdVelocity:
-
+            let targetOffset = itemView.image != nil ? (view.bounds.height / 2) + (itemView.bounds.height / 2) : view.bounds.height
             swipeToDismissTransition?.finishInteractiveTransition(swipeOrientation,
                                                                   touchPoint: touchPoint.y,
-                                                                  targetOffset: (view.bounds.height / 2) + (itemView.bounds.height / 2),
+                                                                  targetOffset: targetOffset,
                                                                   escapeVelocity: velocity.y,
                                                                   completion: swipeToDismissCompletionBlock)
         /// Any item VERTICAL DOWN direction
         case (.vertical, _) where thresholdVelocity < velocity.y:
-
+            let targetOffset = itemView.image != nil ? -(view.bounds.height / 2) - (itemView.bounds.height / 2) : -view.bounds.height
             swipeToDismissTransition?.finishInteractiveTransition(swipeOrientation,
                                                                   touchPoint: touchPoint.y,
-                                                                  targetOffset: -(view.bounds.height / 2) - (itemView.bounds.height / 2),
+                                                                  targetOffset: targetOffset,
                                                                   escapeVelocity: velocity.y,
                                                                   completion: swipeToDismissCompletionBlock)
         /// First item HORIZONTAL RIGHT direction
         case (.horizontal, 0) where thresholdVelocity < velocity.x:
-
+            let targetOffset = itemView.image != nil ? -(view.bounds.width / 2) - (itemView.bounds.width / 2) : -view.bounds.width
             swipeToDismissTransition?.finishInteractiveTransition(swipeOrientation,
                                                                   touchPoint: touchPoint.x,
-                                                                  targetOffset: -(view.bounds.width / 2) - (itemView.bounds.width / 2),
+                                                                  targetOffset: targetOffset,
                                                                   escapeVelocity: velocity.x,
                                                                   completion: swipeToDismissCompletionBlock)
         /// Last item HORIZONTAL LEFT direction
         case (.horizontal, maxIndex) where velocity.x < -thresholdVelocity:
-
+            let targetOffset = itemView.image != nil ? (view.bounds.width / 2) + (itemView.bounds.width / 2) : view.bounds.width
             swipeToDismissTransition?.finishInteractiveTransition(swipeOrientation,
                                                                   touchPoint: touchPoint.x,
-                                                                  targetOffset: (view.bounds.width / 2) + (itemView.bounds.width / 2),
+                                                                  targetOffset: targetOffset,
                                                                   escapeVelocity: velocity.x,
                                                                   completion: swipeToDismissCompletionBlock)
 
@@ -420,49 +452,51 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
 
         alongsideAnimation()
 
-        if var displacedView = displacedViewsDataSource?.provideDisplacementItem(atIndex: index),
+        if presentationStyle == .displacement,
+            var displacedView = displacedViewsDataSource?.provideDisplacementItem(atIndex: index),
             let image = displacedView.image {
 
-            if presentationStyle == .displacement {
+            //Prepare the animated imageView
+            let animatedImageView = displacedView.imageView()
+            tempDisplacementView = animatedImageView
 
-                //Prepare the animated imageView
-                let animatedImageView = displacedView.imageView()
-
-                //rotate the imageView to starting angle
-                if UIApplication.isPortraitOnly == true {
-                    animatedImageView.transform = deviceRotationTransform()
-                }
-
-                //position the image view to starting center
-                animatedImageView.center = displacedView.convertPoint(displacedView.boundsCenter, toView: self.view)
-
-                animatedImageView.clipsToBounds = true
-                self.view.addSubview(animatedImageView)
-
-                if displacementKeepOriginalInPlace == false {
-                    displacedView.hidden = true
-                }
-
-                UIView.animate(withDuration: displacementDuration, delay: 0, usingSpringWithDamping: displacementSpringBounce, initialSpringVelocity: 1, options: .curveEaseIn, animations: { [weak self] in
-
-                    if UIApplication.isPortraitOnly == true {
-                        animatedImageView.transform = CGAffineTransform.identity
-                    }
-                    /// Animate it into the center (with optionally rotating) - that basically includes changing the size and position
-
-                    animatedImageView.bounds.size = self?.displacementTargetSize(forSize: image.size) ?? image.size
-                    animatedImageView.center = self?.view.boundsCenter ?? CGPoint.zero
-
-                    }, completion: { [weak self] _ in
-
-                        self?.itemView.isHidden = false
-                        displacedView.hidden = false
-                        animatedImageView.removeFromSuperview()
-
-                        self?.isAnimating = false
-                        completion()
-                    })
+            //rotate the imageView to starting angle
+            if UIApplication.isPortraitOnly == true {
+                animatedImageView.transform = deviceRotationTransform()
             }
+
+            //position the image view to starting center
+            animatedImageView.center = displacedView.convertPoint(displacedView.boundsCenter, toView: self.view)
+
+            animatedImageView.clipsToBounds = true
+            self.view.addSubview(animatedImageView)
+
+            if displacementKeepOriginalInPlace == false {
+                displacedView.hidden = true
+            }
+
+            UIView.animate(withDuration: displacementDuration, delay: 0, usingSpringWithDamping: displacementSpringBounce, initialSpringVelocity: 1/CGFloat(displacementDuration), options: [], animations: { [weak self] in
+
+                if UIApplication.isPortraitOnly == true {
+                    animatedImageView.transform = CGAffineTransform.identity
+                }
+                /// Animate it into the center (with optionally rotating) - that basically includes changing the size and position
+
+                animatedImageView.bounds.size = self?.displacementTargetSize(forSize: image.size) ?? image.size
+                animatedImageView.center = self?.view.boundsCenter ?? CGPoint.zero
+
+            }, completion: { [weak self] _ in
+
+                self?.itemView.isHidden = false
+                displacedView.hidden = false
+                if self?.fetchImageCompleted ?? true {
+                    self?.tempDisplacementView = nil
+                    animatedImageView.removeFromSuperview()
+                }
+
+                self?.isAnimating = false
+                completion()
+            })
         }
 
         else {
@@ -481,7 +515,7 @@ open class ItemBaseController<T: UIView>: UIViewController, ItemController, UIGe
             })
         }
     }
-
+    
     func displacementTargetSize(forSize size: CGSize) -> CGSize {
 
         let boundingSize = rotationAdjustedBounds().size

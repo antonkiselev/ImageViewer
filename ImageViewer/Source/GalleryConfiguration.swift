@@ -42,11 +42,8 @@ public enum GalleryConfigurationItem {
     /// Layout behaviour for the Delete button.
     case deleteLayout(ButtonLayout)
 
-    /// This spinner is shown when we page to an image page, but the image itself is still loading.
-    case spinnerStyle(UIActivityIndicatorViewStyle)
-
-    /// Tint color for the spinner.
-    case spinnerColor(UIColor)
+    /// Custom view for image loader
+    case customLoader(() -> ImageViewerLoader)
 
     /// Layout behaviour for optional header view.
     case headerViewLayout(HeaderLayout)
